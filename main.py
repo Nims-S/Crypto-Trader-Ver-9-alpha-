@@ -5,11 +5,13 @@ import json
 from pathlib import Path
 
 from ver9.artifacts import ArtifactManager, build_artifact
+from ver9.execution import execute_allocations
 from ver9.generation import generate_candidates
 from ver9.lifecycle import auto_promote
 from ver9.portfolio import allocate
 from ver9.protections import ProtectionEngine
 from ver9.registry import list_candidates, summarize_registry, upsert_candidate
+from ver9.risk import RiskMonitor
 from ver9.universe import DEFAULT_UNIVERSE, PairUniverseManager
 from ver9.validation import validate_candidate
 
@@ -182,6 +184,53 @@ def cmd_registry_summary(args: argparse.Namespace) -> None:
 
 
 # --------------------
+# Live execution / risk
+# --------------------
+
+
+def cmd_execute(args: argparse.Namespace) -> None:
+    allocation_rows = list_candidates(status=args.status, family=args.family, symbol=args.symbol)
+    allocations = [
+        {
+            "strategy_id": row.get("strategy_id"),
+            "symbol": row.get("symbol"),
+            "family": row.get("family"),
+            "allocation_pct": float(row.get("allocation_pct") or row.get("allocation") or 0.0),
+            "status": row.get("status"),
+        }
+        for row in allocation_rows
+    ]
+    summary = execute_allocations(allocations, capital=args.capital, live=args.live)
+    dump(summary.as_dict(), args.output_file)
+
+
+
+def cmd_risk(args: argparse.Namespace) -> None:
+    monitor = RiskMonitor()
+    if args.mode == "portfolio":
+        state = monitor.evaluate_portfolio(
+            portfolio_drawdown_pct=args.drawdown,
+            rolling_loss_streak=args.loss_streak,
+            volatility_regime_score=args.volatility,
+        )
+        dump(state.as_dict(), args.output_file)
+        return
+
+    drift = monitor.evaluate_drift(
+        strategy_id=args.strategy_id,
+        live_metrics={
+            "return_pct": args.live_return,
+            "max_drawdown_pct": args.live_drawdown,
+        },
+        expected_metrics={
+            "return_pct": args.expected_return,
+            "max_drawdown_pct": args.expected_drawdown,
+        },
+    )
+    dump(drift.as_dict(), args.output_file)
+
+
+# --------------------
 # Artifact
 # --------------------
 
@@ -239,6 +288,28 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("registry-summary")
     p.add_argument("--output-file", default=None)
     p.set_defaults(func=cmd_registry_summary)
+
+    p = sub.add_parser("execute")
+    p.add_argument("--capital", type=float, default=10000.0)
+    p.add_argument("--live", action="store_true")
+    p.add_argument("--status", default=None)
+    p.add_argument("--family", default=None)
+    p.add_argument("--symbol", default=None)
+    p.add_argument("--output-file", default=None)
+    p.set_defaults(func=cmd_execute)
+
+    p = sub.add_parser("risk")
+    p.add_argument("--mode", choices=["portfolio", "drift"], default="portfolio")
+    p.add_argument("--drawdown", type=float, default=-4.0)
+    p.add_argument("--loss-streak", type=int, default=1)
+    p.add_argument("--volatility", type=float, default=0.5)
+    p.add_argument("--strategy-id", default="demo_strategy")
+    p.add_argument("--live-return", type=float, default=0.0)
+    p.add_argument("--expected-return", type=float, default=0.0)
+    p.add_argument("--live-drawdown", type=float, default=0.0)
+    p.add_argument("--expected-drawdown", type=float, default=0.0)
+    p.add_argument("--output-file", default=None)
+    p.set_defaults(func=cmd_risk)
 
     p = sub.add_parser("artifact")
     p.add_argument("--cycle-id", default="cycle_alpha")

@@ -5,11 +5,15 @@ import json
 from pathlib import Path
 
 from ver9.artifacts import ArtifactManager, build_artifact
+from ver9.generation import generate_candidates
+from ver9.lifecycle import auto_promote
+from ver9.portfolio import allocate
 from ver9.protections import ProtectionEngine
+from ver9.registry import list_candidates, summarize_registry, upsert_candidate
 from ver9.universe import DEFAULT_UNIVERSE, PairUniverseManager
 
 
-def dump(payload: dict, output_file: str | None = None) -> None:
+def dump(payload: dict | list, output_file: str | None = None) -> None:
     text = json.dumps(payload, indent=2, sort_keys=True)
     if output_file:
         path = Path(output_file)
@@ -18,10 +22,20 @@ def dump(payload: dict, output_file: str | None = None) -> None:
     print(text)
 
 
+# --------------------
+# Universe
+# --------------------
+
+
 def cmd_universe(args: argparse.Namespace) -> None:
     manager = PairUniverseManager()
     approved = manager.evaluate(DEFAULT_UNIVERSE)
     dump({"approved_universe": approved}, args.output_file)
+
+
+# --------------------
+# Protections
+# --------------------
 
 
 def cmd_protections(args: argparse.Namespace) -> None:
@@ -32,6 +46,78 @@ def cmd_protections(args: argparse.Namespace) -> None:
         volatility_regime_score=args.volatility,
     )
     dump(decision.__dict__, args.output_file)
+
+
+# --------------------
+# Evolution
+# --------------------
+
+
+def cmd_evolve(args: argparse.Namespace) -> None:
+    generated = generate_candidates(iterations=args.iterations)
+
+    promoted: list[dict] = []
+
+    for row in generated:
+        promoted_row = auto_promote(row)
+        promoted.append(promoted_row)
+        upsert_candidate(promoted_row)
+
+    deployable = [
+        row
+        for row in promoted
+        if row.get("status") in {"validated", "probationary", "deployable"}
+    ]
+
+    portfolio = allocate(deployable, max_positions=args.max_positions)
+
+    artifact = build_artifact(
+        cycle_id=args.cycle_id,
+        config={
+            "iterations": args.iterations,
+            "max_positions": args.max_positions,
+        },
+        survivors=deployable,
+        portfolio=portfolio,
+        protections=[{"status": "active"}],
+    )
+
+    artifact_path = ArtifactManager().save(artifact)
+
+    dump(
+        {
+            "generated": len(generated),
+            "survivors": len(deployable),
+            "portfolio_size": len(portfolio),
+            "artifact": str(artifact_path),
+            "portfolio": portfolio,
+        },
+        args.output_file,
+    )
+
+
+# --------------------
+# Registry
+# --------------------
+
+
+def cmd_registry(args: argparse.Namespace) -> None:
+    rows = list_candidates(
+        status=args.status,
+        family=args.family,
+        symbol=args.symbol,
+    )
+    dump(rows, args.output_file)
+
+
+
+def cmd_registry_summary(args: argparse.Namespace) -> None:
+    dump(summarize_registry(), args.output_file)
+
+
+# --------------------
+# Artifact
+# --------------------
 
 
 def cmd_artifact(args: argparse.Namespace) -> None:
@@ -45,6 +131,11 @@ def cmd_artifact(args: argparse.Namespace) -> None:
     )
     path = manager.save(artifact)
     dump({"artifact_path": str(path)}, args.output_file)
+
+
+# --------------------
+# CLI
+# --------------------
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -61,6 +152,24 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--volatility", type=float, default=0.5)
     p.add_argument("--output-file", default=None)
     p.set_defaults(func=cmd_protections)
+
+    p = sub.add_parser("evolve")
+    p.add_argument("--iterations", type=int, default=5)
+    p.add_argument("--max-positions", type=int, default=3)
+    p.add_argument("--cycle-id", default="cycle_alpha")
+    p.add_argument("--output-file", default=None)
+    p.set_defaults(func=cmd_evolve)
+
+    p = sub.add_parser("registry")
+    p.add_argument("--status", default=None)
+    p.add_argument("--family", default=None)
+    p.add_argument("--symbol", default=None)
+    p.add_argument("--output-file", default=None)
+    p.set_defaults(func=cmd_registry)
+
+    p = sub.add_parser("registry-summary")
+    p.add_argument("--output-file", default=None)
+    p.set_defaults(func=cmd_registry_summary)
 
     p = sub.add_parser("artifact")
     p.add_argument("--cycle-id", default="cycle_alpha")

@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 from ver9.artifacts import ArtifactManager, build_artifact
+from ver9.daemon import run_daemon_once
 from ver9.execution import execute_allocations
 from ver9.generation import generate_candidates
 from ver9.lifecycle import auto_promote
@@ -12,6 +13,7 @@ from ver9.portfolio import allocate
 from ver9.protections import ProtectionEngine
 from ver9.registry import list_candidates, summarize_registry, upsert_candidate
 from ver9.risk import RiskMonitor
+from ver9.state import summarize_state
 from ver9.universe import DEFAULT_UNIVERSE, PairUniverseManager
 from ver9.validation import validate_candidate
 
@@ -231,6 +233,21 @@ def cmd_risk(args: argparse.Namespace) -> None:
 
 
 # --------------------
+# Daemon / State
+# --------------------
+
+
+def cmd_daemon(args: argparse.Namespace) -> None:
+    cycle = run_daemon_once(capital=args.capital, max_positions=args.max_positions, live=args.live)
+    dump(cycle, args.output_file)
+
+
+
+def cmd_state(args: argparse.Namespace) -> None:
+    dump(summarize_state(), args.output_file)
+
+
+# --------------------
 # Artifact
 # --------------------
 
@@ -310,6 +327,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--expected-drawdown", type=float, default=0.0)
     p.add_argument("--output-file", default=None)
     p.set_defaults(func=cmd_risk)
+
+    p = sub.add_parser("daemon")
+    p.add_argument("--capital", type=float, default=10000.0)
+    p.add_argument("--max-positions", type=int, default=3)
+    p.add_argument("--live", action="store_true")
+    p.add_argument("--output-file", default=None)
+    p.set_defaults(func=cmd_daemon)
+
+    p = sub.add_parser("state")
+    p.add_argument("--output-file", default=None)
+    p.set_defaults(func=cmd_state)
 
     p = sub.add_parser("artifact")
     p.add_argument("--cycle-id", default="cycle_alpha")

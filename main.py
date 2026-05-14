@@ -6,6 +6,7 @@ from pathlib import Path
 
 from ver9.artifacts import ArtifactManager, build_artifact
 from ver9.daemon import run_daemon_once
+from ver9.distributed import DistributedEvolutionCoordinator
 from ver9.execution import execute_allocations
 from ver9.generation import generate_candidates
 from ver9.lifecycle import auto_promote
@@ -167,6 +168,28 @@ def cmd_evolve(args: argparse.Namespace) -> None:
 
 
 # --------------------
+# Distributed evolution
+# --------------------
+
+
+def cmd_distributed(args: argparse.Namespace) -> None:
+    coordinator = DistributedEvolutionCoordinator(
+        worker_count=args.worker_count,
+        batch_size=args.batch_size,
+    )
+    summary = coordinator.run(
+        iterations=args.iterations,
+        folds=args.folds,
+        mc_iterations=args.mc_iterations,
+        perturbation_trials=args.perturbation_trials,
+        max_positions=args.max_positions,
+        cycle_id=args.cycle_id,
+        artifact_dir=args.artifact_dir,
+    )
+    dump(summary.as_dict(), args.output_file)
+
+
+# --------------------
 # Registry
 # --------------------
 
@@ -294,6 +317,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--cycle-id", default="cycle_alpha")
     p.add_argument("--output-file", default=None)
     p.set_defaults(func=cmd_evolve)
+
+    p = sub.add_parser("distributed-evolve")
+    p.add_argument("--iterations", type=int, default=5)
+    p.add_argument("--folds", type=int, default=4)
+    p.add_argument("--mc-iterations", type=int, default=500)
+    p.add_argument("--perturbation-trials", type=int, default=100)
+    p.add_argument("--max-positions", type=int, default=3)
+    p.add_argument("--worker-count", type=int, default=4)
+    p.add_argument("--batch-size", type=int, default=8)
+    p.add_argument("--cycle-id", default="distributed_cycle")
+    p.add_argument("--artifact-dir", default="artifacts")
+    p.add_argument("--output-file", default=None)
+    p.set_defaults(func=cmd_distributed)
 
     p = sub.add_parser("registry")
     p.add_argument("--status", default=None)

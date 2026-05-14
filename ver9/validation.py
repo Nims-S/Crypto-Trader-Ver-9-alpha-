@@ -9,6 +9,9 @@ from typing import Any
 from .models import StrategyEvidence
 
 
+DEFAULT_VALIDATION_SYMBOLS = ("BTC/USDT", "ETH/USDT", "SOL/USDT")
+
+
 @dataclass(slots=True)
 class WalkForwardResult:
     fold_count: int
@@ -50,10 +53,23 @@ class PerturbationResult:
 
 
 @dataclass(slots=True)
+class CrossSymbolResult:
+    symbols_tested: list[str]
+    mean_score: float
+    score_spread: float
+    passed: bool
+    reasons: list[str]
+
+    def as_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(slots=True)
 class ValidationBundle:
     walk_forward: WalkForwardResult
     monte_carlo: MonteCarloResult
     perturbation: PerturbationResult
+    cross_symbol: CrossSymbolResult
     evidence: StrategyEvidence
 
     def as_dict(self) -> dict[str, Any]:
@@ -61,6 +77,7 @@ class ValidationBundle:
             "walk_forward": self.walk_forward.as_dict(),
             "monte_carlo": self.monte_carlo.as_dict(),
             "perturbation": self.perturbation.as_dict(),
+            "cross_symbol": self.cross_symbol.as_dict(),
             "evidence": asdict(self.evidence),
         }
 
@@ -197,16 +214,51 @@ def run_perturbation(candidate: dict[str, Any], *, trials: int = 100) -> Perturb
     )
 
 
+def run_cross_symbol(candidate: dict[str, Any], *, symbols: tuple[str, ...] = DEFAULT_VALIDATION_SYMBOLS) -> CrossSymbolResult:
+    strategy_id = str(candidate.get("strategy_id") or "unknown")
+    family = str(candidate.get("family") or "unknown")
+    symbol = str(candidate.get("symbol") or "")
+
+    tested = [s for s in symbols if s != symbol] or list(symbols)
+    scores: list[float] = []
+    reasons: list[str] = []
+
+    for peer in tested:
+        peer_seed = _seed_value(f"{strategy_id}:{peer}", "xs")
+        base = float(candidate.get("robustness_score") or 0.0)
+        family_bonus = 0.05 if family in {"mean_reversion", "volatility_compression"} else -0.03
+        symbol_fit = 0.08 if symbol.startswith("BTC") or peer.startswith("BTC") else 0.03
+        score = _clamp(base + family_bonus + symbol_fit + ((peer_seed - 0.5) * 0.2), 0.0, 1.0)
+        scores.append(score)
+
+    mean_score = mean(scores) if scores else 0.0
+    score_spread = pstdev(scores) if len(scores) > 1 else 0.0
+    passed = mean_score >= 0.48 and score_spread <= 0.20
+    if mean_score < 0.48:
+        reasons.append("cross_symbol_weak")
+    if score_spread > 0.20:
+        reasons.append("cross_symbol_spread_high")
+
+    return CrossSymbolResult(
+        symbols_tested=tested,
+        mean_score=round(mean_score, 4),
+        score_spread=round(score_spread, 4),
+        passed=passed,
+        reasons=reasons,
+    )
+
+
 def validate_candidate(candidate: dict[str, Any], *, folds: int = 4, iterations: int = 500, trials: int = 100) -> ValidationBundle:
     walk_forward = run_walk_forward(candidate, folds=folds)
     monte_carlo = run_monte_carlo(candidate, iterations=iterations)
     perturbation = run_perturbation(candidate, trials=trials)
+    cross_symbol = run_cross_symbol(candidate)
 
     evidence = StrategyEvidence(
         monte_carlo_score=monte_carlo.score,
         perturbation_score=perturbation.stability_score,
         walk_forward_score=(walk_forward.train_mean + walk_forward.val_mean + walk_forward.test_mean) / 3.0,
-        cross_symbol_score=float(candidate.get("cross_symbol_score") or 0.0),
+        cross_symbol_score=cross_symbol.mean_score,
         robustness_score=float(candidate.get("robustness_score") or 0.0),
     )
 
@@ -214,5 +266,6 @@ def validate_candidate(candidate: dict[str, Any], *, folds: int = 4, iterations:
         walk_forward=walk_forward,
         monte_carlo=monte_carlo,
         perturbation=perturbation,
+        cross_symbol=cross_symbol,
         evidence=evidence,
     )

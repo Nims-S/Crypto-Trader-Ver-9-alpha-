@@ -11,10 +11,11 @@ from ver9.portfolio import allocate
 from ver9.protections import ProtectionEngine
 from ver9.registry import list_candidates, summarize_registry, upsert_candidate
 from ver9.universe import DEFAULT_UNIVERSE, PairUniverseManager
+from ver9.validation import validate_candidate
 
 
 def dump(payload: dict | list, output_file: str | None = None) -> None:
-    text = json.dumps(payload, indent=2, sort_keys=True)
+    text = json.dumps(payload, indent=2, sort_keys=True, default=str)
     if output_file:
         path = Path(output_file)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -53,14 +54,75 @@ def cmd_protections(args: argparse.Namespace) -> None:
 # --------------------
 
 
+def _merge_validation(row: dict, validation: dict) -> dict:
+    merged = dict(row)
+    merged["validation"] = validation
+
+    wf = validation.get("walk_forward") or {}
+    mc = validation.get("monte_carlo") or {}
+    pt = validation.get("perturbation") or {}
+    xs = validation.get("cross_symbol") or {}
+    evidence = validation.get("evidence") or {}
+
+    merged["walk_forward"] = wf
+    merged["monte_carlo"] = mc
+    merged["perturbation"] = pt
+    merged["cross_symbol"] = xs
+    merged["strategy_evidence"] = evidence
+
+    merged["walk_forward_score"] = evidence.get("walk_forward_score", 0.0)
+    merged["monte_carlo_score"] = evidence.get("monte_carlo_score", 0.0)
+    merged["perturbation_score"] = evidence.get("perturbation_score", 0.0)
+    merged["cross_symbol_score"] = evidence.get("cross_symbol_score", 0.0)
+
+    merged["robustness_score"] = max(
+        float(merged.get("robustness_score") or 0.0),
+        float(evidence.get("robustness_score") or 0.0),
+        float(evidence.get("cross_symbol_score") or 0.0),
+        float(mc.get("score") or 0.0),
+        float(pt.get("stability_score") or 0.0),
+    )
+
+    merged["profit_factor"] = float(merged.get("profit_factor") or 0.0)
+    merged["return_pct"] = float(merged.get("return_pct") or 0.0)
+    merged["max_drawdown_pct"] = float(merged.get("max_drawdown_pct") or 0.0)
+    merged["trades"] = int(merged.get("trades") or 0)
+    merged["validation_passed"] = bool(
+        wf.get("passed") and mc.get("passed") and pt.get("passed") and xs.get("passed")
+    )
+    merged["validation_score"] = round(
+        (
+            float(wf.get("train_mean") or 0.0)
+            + float(wf.get("val_mean") or 0.0)
+            + float(wf.get("test_mean") or 0.0)
+            + float(mc.get("score") or 0.0)
+            + float(pt.get("stability_score") or 0.0)
+            + float(xs.get("mean_score") or 0.0)
+        )
+        / 6.0,
+        4,
+    )
+
+    return merged
+
+
 def cmd_evolve(args: argparse.Namespace) -> None:
     generated = generate_candidates(iterations=args.iterations)
 
     promoted: list[dict] = []
+    validation_summaries: list[dict] = []
 
     for row in generated:
-        promoted_row = auto_promote(row)
+        validation = validate_candidate(row, folds=args.folds, iterations=args.mc_iterations, trials=args.perturbation_trials)
+        merged = _merge_validation(row, validation.as_dict())
+        promoted_row = auto_promote(merged)
         promoted.append(promoted_row)
+        validation_summaries.append({
+            "strategy_id": promoted_row.get("strategy_id"),
+            "validation_passed": promoted_row.get("validation_passed", False),
+            "validation_score": promoted_row.get("validation_score", 0.0),
+            "status": promoted_row.get("status"),
+        })
         upsert_candidate(promoted_row)
 
     deployable = [
@@ -76,6 +138,9 @@ def cmd_evolve(args: argparse.Namespace) -> None:
         config={
             "iterations": args.iterations,
             "max_positions": args.max_positions,
+            "folds": args.folds,
+            "mc_iterations": args.mc_iterations,
+            "perturbation_trials": args.perturbation_trials,
         },
         survivors=deployable,
         portfolio=portfolio,
@@ -91,6 +156,7 @@ def cmd_evolve(args: argparse.Namespace) -> None:
             "portfolio_size": len(portfolio),
             "artifact": str(artifact_path),
             "portfolio": portfolio,
+            "validation_summaries": validation_summaries[:20],
         },
         args.output_file,
     )
@@ -155,6 +221,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("evolve")
     p.add_argument("--iterations", type=int, default=5)
+    p.add_argument("--folds", type=int, default=4)
+    p.add_argument("--mc-iterations", type=int, default=500)
+    p.add_argument("--perturbation-trials", type=int, default=100)
     p.add_argument("--max-positions", type=int, default=3)
     p.add_argument("--cycle-id", default="cycle_alpha")
     p.add_argument("--output-file", default=None)

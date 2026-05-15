@@ -1,9 +1,15 @@
 from __future__ import annotations
 
 import hashlib
+from collections import Counter
 from statistics import mean
 from typing import Any
 
+from .diversity import (
+    DEFAULT_FAMILY_QUOTAS,
+    DEFAULT_SYMBOL_QUOTAS,
+    build_generation_quota_plan,
+)
 from .mutation_spaces import get_mutation_space
 
 
@@ -58,18 +64,67 @@ def build_candidate(*, family: str, symbol: str, iteration: int) -> dict[str, An
     }
 
 
-def generate_candidates(iterations: int = 5) -> list[dict[str, Any]]:
-    generated: list[dict[str, Any]] = []
+def build_generation_plan(
+    iterations: int,
+    *,
+    family_quota: dict[str, int] | None = None,
+    symbol_quota: dict[str, int] | None = None,
+) -> list[dict[str, Any]]:
+    return build_generation_quota_plan(
+        iterations,
+        DEFAULT_FAMILIES,
+        DEFAULT_SYMBOLS,
+        family_quota=family_quota or DEFAULT_FAMILY_QUOTAS,
+        symbol_quota=symbol_quota or DEFAULT_SYMBOL_QUOTAS,
+    )
 
-    for family in DEFAULT_FAMILIES:
-        for symbol in DEFAULT_SYMBOLS:
-            for iteration in range(iterations):
-                generated.append(
-                    build_candidate(
-                        family=family,
-                        symbol=symbol,
-                        iteration=iteration,
-                    )
+
+def generation_quota_report(
+    iterations: int,
+    *,
+    family_quota: dict[str, int] | None = None,
+    symbol_quota: dict[str, int] | None = None,
+) -> dict[str, Any]:
+    plan = build_generation_plan(
+        iterations,
+        family_quota=family_quota,
+        symbol_quota=symbol_quota,
+    )
+    family_counts = Counter(item["family"] for item in plan)
+    symbol_counts = Counter(item["symbol"] for item in plan)
+    return {
+        "iterations": max(1, int(iterations)),
+        "total_planned": sum(int(item["count"]) for item in plan),
+        "family_counts": dict(family_counts),
+        "symbol_counts": dict(symbol_counts),
+        "plan": plan,
+    }
+
+
+def generate_candidates(
+    iterations: int = 5,
+    *,
+    family_quota: dict[str, int] | None = None,
+    symbol_quota: dict[str, int] | None = None,
+) -> list[dict[str, Any]]:
+    generated: list[dict[str, Any]] = []
+    plan = build_generation_plan(
+        iterations,
+        family_quota=family_quota,
+        symbol_quota=symbol_quota,
+    )
+
+    for item in plan:
+        family = str(item["family"])
+        symbol = str(item["symbol"])
+        count = max(0, int(item["count"]))
+        for iteration in range(count):
+            generated.append(
+                build_candidate(
+                    family=family,
+                    symbol=symbol,
+                    iteration=iteration,
                 )
+            )
 
     return generated

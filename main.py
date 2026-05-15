@@ -5,12 +5,13 @@ import json
 from pathlib import Path
 
 from ver9.artifacts import ArtifactManager, build_artifact
+from ver9.basket_optimizer import basket_summary
 from ver9.daemon import run_daemon_once
 from ver9.distributed import DistributedEvolutionCoordinator
 from ver9.execution import execute_allocations
 from ver9.generation import generate_candidates
 from ver9.lifecycle import auto_promote
-from ver9.portfolio import allocate
+from ver9.portfolio import allocate, portfolio_summary, probationary_portfolio, strict_portfolio
 from ver9.protections import ProtectionEngine
 from ver9.registry import list_candidates, summarize_registry, upsert_candidate
 from ver9.risk import RiskMonitor
@@ -136,13 +137,20 @@ def cmd_evolve(args: argparse.Namespace) -> None:
         if row.get("status") in {"validated", "probationary", "deployable"}
     ]
 
-    portfolio = allocate(deployable, max_positions=args.max_positions)
+    portfolio = allocate(
+        deployable,
+        max_positions=args.max_positions,
+        min_positions=args.min_positions,
+        soft_fill=not args.strict,
+    )
 
     artifact = build_artifact(
         cycle_id=args.cycle_id,
         config={
             "iterations": args.iterations,
             "max_positions": args.max_positions,
+            "min_positions": args.min_positions,
+            "strict": args.strict,
             "folds": args.folds,
             "mc_iterations": args.mc_iterations,
             "perturbation_trials": args.perturbation_trials,
@@ -161,10 +169,59 @@ def cmd_evolve(args: argparse.Namespace) -> None:
             "portfolio_size": len(portfolio),
             "artifact": str(artifact_path),
             "portfolio": portfolio,
+            "basket": portfolio_summary(
+                deployable,
+                max_positions=args.max_positions,
+                min_positions=args.min_positions,
+                soft_fill=not args.strict,
+            ),
             "validation_summaries": validation_summaries[:20],
         },
         args.output_file,
     )
+
+
+# --------------------
+# Basket optimizer
+# --------------------
+
+
+def _registry_candidates(args: argparse.Namespace) -> list[dict]:
+    return list_candidates(
+        status=args.status,
+        family=args.family,
+        symbol=args.symbol,
+    )
+
+
+
+def cmd_basket(args: argparse.Namespace) -> None:
+    rows = _registry_candidates(args)
+    summary = basket_summary(
+        rows,
+        max_positions=args.max_positions,
+        min_positions=args.min_positions,
+        soft_fill=not args.strict,
+    )
+    dump(summary, args.output_file)
+
+
+
+def cmd_portfolio_strict(args: argparse.Namespace) -> None:
+    rows = _registry_candidates(args)
+    portfolio = strict_portfolio(rows, max_positions=args.max_positions)
+    dump({"portfolio": portfolio, "mode": "strict"}, args.output_file)
+
+
+
+def cmd_portfolio_probationary(args: argparse.Namespace) -> None:
+    rows = _registry_candidates(args)
+    portfolio = probationary_portfolio(
+        rows,
+        max_positions=args.max_positions,
+        min_positions=args.min_positions,
+    )
+    dump({"portfolio": portfolio, "mode": "probationary"}, args.output_file)
 
 
 # --------------------
@@ -215,16 +272,12 @@ def cmd_registry_summary(args: argparse.Namespace) -> None:
 
 def cmd_execute(args: argparse.Namespace) -> None:
     allocation_rows = list_candidates(status=args.status, family=args.family, symbol=args.symbol)
-    allocations = [
-        {
-            "strategy_id": row.get("strategy_id"),
-            "symbol": row.get("symbol"),
-            "family": row.get("family"),
-            "allocation_pct": float(row.get("allocation_pct") or row.get("allocation") or 0.0),
-            "status": row.get("status"),
-        }
-        for row in allocation_rows
-    ]
+    allocations = allocate(
+        allocation_rows,
+        max_positions=args.max_positions,
+        min_positions=args.min_positions,
+        soft_fill=not args.strict,
+    )
     summary = execute_allocations(allocations, capital=args.capital, live=args.live)
     dump(summary.as_dict(), args.output_file)
 
@@ -314,9 +367,38 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--mc-iterations", type=int, default=500)
     p.add_argument("--perturbation-trials", type=int, default=100)
     p.add_argument("--max-positions", type=int, default=3)
+    p.add_argument("--min-positions", type=int, default=2)
+    p.add_argument("--strict", action="store_true")
     p.add_argument("--cycle-id", default="cycle_alpha")
     p.add_argument("--output-file", default=None)
     p.set_defaults(func=cmd_evolve)
+
+    p = sub.add_parser("basket")
+    p.add_argument("--status", default=None)
+    p.add_argument("--family", default=None)
+    p.add_argument("--symbol", default=None)
+    p.add_argument("--max-positions", type=int, default=3)
+    p.add_argument("--min-positions", type=int, default=2)
+    p.add_argument("--strict", action="store_true")
+    p.add_argument("--output-file", default=None)
+    p.set_defaults(func=cmd_basket)
+
+    p = sub.add_parser("portfolio-strict")
+    p.add_argument("--status", default=None)
+    p.add_argument("--family", default=None)
+    p.add_argument("--symbol", default=None)
+    p.add_argument("--max-positions", type=int, default=3)
+    p.add_argument("--output-file", default=None)
+    p.set_defaults(func=cmd_portfolio_strict)
+
+    p = sub.add_parser("portfolio-probationary")
+    p.add_argument("--status", default=None)
+    p.add_argument("--family", default=None)
+    p.add_argument("--symbol", default=None)
+    p.add_argument("--max-positions", type=int, default=3)
+    p.add_argument("--min-positions", type=int, default=2)
+    p.add_argument("--output-file", default=None)
+    p.set_defaults(func=cmd_portfolio_probationary)
 
     p = sub.add_parser("distributed-evolve")
     p.add_argument("--iterations", type=int, default=5)
@@ -348,6 +430,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--status", default=None)
     p.add_argument("--family", default=None)
     p.add_argument("--symbol", default=None)
+    p.add_argument("--max-positions", type=int, default=3)
+    p.add_argument("--min-positions", type=int, default=2)
+    p.add_argument("--strict", action="store_true")
     p.add_argument("--output-file", default=None)
     p.set_defaults(func=cmd_execute)
 

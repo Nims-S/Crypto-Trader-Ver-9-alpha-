@@ -6,10 +6,14 @@ from pathlib import Path
 
 from ver9.artifacts import ArtifactManager, build_artifact
 from ver9.basket_optimizer import basket_summary
-from ver9.daemon import run_daemon_once
+from ver9.daemon import run_daemon_forever, run_daemon_once
 from ver9.distributed import DistributedEvolutionCoordinator
+from ver9.diversity import diversity_report
 from ver9.execution import execute_allocations
-from ver9.generation import generate_candidates
+from ver9.generation import (
+    generate_candidates,
+    generation_quota_report,
+)
 from ver9.lifecycle import auto_promote
 from ver9.portfolio import allocate, portfolio_summary, probationary_portfolio, strict_portfolio
 from ver9.protections import ProtectionEngine
@@ -29,20 +33,11 @@ def dump(payload: dict | list, output_file: str | None = None) -> None:
     print(text)
 
 
-# --------------------
-# Universe
-# --------------------
-
-
 def cmd_universe(args: argparse.Namespace) -> None:
     manager = PairUniverseManager()
     approved = manager.evaluate(DEFAULT_UNIVERSE)
     dump({"approved_universe": approved}, args.output_file)
 
-
-# --------------------
-# Protections
-# --------------------
 
 
 def cmd_protections(args: argparse.Namespace) -> None:
@@ -54,10 +49,6 @@ def cmd_protections(args: argparse.Namespace) -> None:
     )
     dump(decision.__dict__, args.output_file)
 
-
-# --------------------
-# Evolution
-# --------------------
 
 
 def _merge_validation(row: dict, validation: dict) -> dict:
@@ -112,6 +103,7 @@ def _merge_validation(row: dict, validation: dict) -> dict:
     return merged
 
 
+
 def cmd_evolve(args: argparse.Namespace) -> None:
     generated = generate_candidates(iterations=args.iterations)
 
@@ -121,8 +113,14 @@ def cmd_evolve(args: argparse.Namespace) -> None:
     for row in generated:
         validation = validate_candidate(row, folds=args.folds, iterations=args.mc_iterations, trials=args.perturbation_trials)
         merged = _merge_validation(row, validation.as_dict())
-        promoted_row = auto_promote(merged)
+
+        basket_context = diversity_report(promoted).as_dict() if promoted else {}
+        basket_context["selected_count"] = len(promoted)
+        basket_context["max_positions"] = args.max_positions
+
+        promoted_row = auto_promote(merged, basket_context=basket_context)
         promoted.append(promoted_row)
+
         validation_summaries.append({
             "strategy_id": promoted_row.get("strategy_id"),
             "validation_passed": promoted_row.get("validation_passed", False),
@@ -175,15 +173,12 @@ def cmd_evolve(args: argparse.Namespace) -> None:
                 min_positions=args.min_positions,
                 soft_fill=not args.strict,
             ),
+            "diversity": diversity_report(deployable).as_dict(),
             "validation_summaries": validation_summaries[:20],
         },
         args.output_file,
     )
 
-
-# --------------------
-# Basket optimizer
-# --------------------
 
 
 def _registry_candidates(args: argparse.Namespace) -> list[dict]:
@@ -224,9 +219,16 @@ def cmd_portfolio_probationary(args: argparse.Namespace) -> None:
     dump({"portfolio": portfolio, "mode": "probationary"}, args.output_file)
 
 
-# --------------------
-# Distributed evolution
-# --------------------
+
+def cmd_diversity(args: argparse.Namespace) -> None:
+    rows = _registry_candidates(args)
+    dump(diversity_report(rows).as_dict(), args.output_file)
+
+
+
+def cmd_generation_quota(args: argparse.Namespace) -> None:
+    dump(generation_quota_report(args.iterations), args.output_file)
+
 
 
 def cmd_distributed(args: argparse.Namespace) -> None:
@@ -246,10 +248,6 @@ def cmd_distributed(args: argparse.Namespace) -> None:
     dump(summary.as_dict(), args.output_file)
 
 
-# --------------------
-# Registry
-# --------------------
-
 
 def cmd_registry(args: argparse.Namespace) -> None:
     rows = list_candidates(
@@ -264,10 +262,6 @@ def cmd_registry(args: argparse.Namespace) -> None:
 def cmd_registry_summary(args: argparse.Namespace) -> None:
     dump(summarize_registry(), args.output_file)
 
-
-# --------------------
-# Live execution / risk
-# --------------------
 
 
 def cmd_execute(args: argparse.Namespace) -> None:
@@ -308,12 +302,19 @@ def cmd_risk(args: argparse.Namespace) -> None:
     dump(drift.as_dict(), args.output_file)
 
 
-# --------------------
-# Daemon / State
-# --------------------
-
 
 def cmd_daemon(args: argparse.Namespace) -> None:
+    if args.forever:
+        cycles = run_daemon_forever(
+            capital=args.capital,
+            max_positions=args.max_positions,
+            live=args.live,
+            cycle_interval_seconds=args.cycle_interval_seconds,
+            max_cycles=args.max_cycles,
+        )
+        dump({"cycles": cycles, "mode": "continuous"}, args.output_file)
+        return
+
     cycle = run_daemon_once(capital=args.capital, max_positions=args.max_positions, live=args.live)
     dump(cycle, args.output_file)
 
@@ -322,10 +323,6 @@ def cmd_daemon(args: argparse.Namespace) -> None:
 def cmd_state(args: argparse.Namespace) -> None:
     dump(summarize_state(), args.output_file)
 
-
-# --------------------
-# Artifact
-# --------------------
 
 
 def cmd_artifact(args: argparse.Namespace) -> None:
@@ -340,10 +337,6 @@ def cmd_artifact(args: argparse.Namespace) -> None:
     path = manager.save(artifact)
     dump({"artifact_path": str(path)}, args.output_file)
 
-
-# --------------------
-# CLI
-# --------------------
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -400,6 +393,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--output-file", default=None)
     p.set_defaults(func=cmd_portfolio_probationary)
 
+    p = sub.add_parser("diversity")
+    p.add_argument("--status", default=None)
+    p.add_argument("--family", default=None)
+    p.add_argument("--symbol", default=None)
+    p.add_argument("--output-file", default=None)
+    p.set_defaults(func=cmd_diversity)
+
+    p = sub.add_parser("generation-quota")
+    p.add_argument("--iterations", type=int, default=5)
+    p.add_argument("--output-file", default=None)
+    p.set_defaults(func=cmd_generation_quota)
+
     p = sub.add_parser("distributed-evolve")
     p.add_argument("--iterations", type=int, default=5)
     p.add_argument("--folds", type=int, default=4)
@@ -453,6 +458,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--capital", type=float, default=10000.0)
     p.add_argument("--max-positions", type=int, default=3)
     p.add_argument("--live", action="store_true")
+    p.add_argument("--forever", action="store_true")
+    p.add_argument("--cycle-interval-seconds", type=float, default=5.0)
+    p.add_argument("--max-cycles", type=int, default=None)
     p.add_argument("--output-file", default=None)
     p.set_defaults(func=cmd_daemon)
 

@@ -2,52 +2,62 @@ from __future__ import annotations
 
 from typing import Any
 
-
-FAMILY_PENALTIES = {
-    "trend": 0.85,
-    "mean_reversion": 1.0,
-    "volatility_compression": 0.95,
-}
+from .basket_optimizer import BasketOptimizer, build_basket
 
 
-def candidate_score(candidate: dict[str, Any]) -> float:
-    pf = float(candidate.get("profit_factor") or 0.0)
-    ret = float(candidate.get("return_pct") or 0.0)
-    dd = abs(float(candidate.get("max_drawdown_pct") or 0.0))
-    robustness = float(candidate.get("robustness_score") or 0.0)
-
-    family = str(candidate.get("family") or "")
-    penalty = FAMILY_PENALTIES.get(family, 0.9)
-
-    score = ((pf * 2.0) + (ret / 10.0) + (robustness * 5.0)) / max(dd, 1.0)
-    return round(score * penalty, 4)
+DEFAULT_MIN_POSITIONS = 2
+DEFAULT_MAX_POSITIONS = 3
 
 
-def allocate(candidates: list[dict[str, Any]], *, max_positions: int = 3) -> list[dict[str, Any]]:
-    ranked = sorted(candidates, key=candidate_score, reverse=True)
+def allocate(
+    candidates: list[dict[str, Any]],
+    *,
+    max_positions: int = DEFAULT_MAX_POSITIONS,
+    min_positions: int = DEFAULT_MIN_POSITIONS,
+    soft_fill: bool = True,
+) -> list[dict[str, Any]]:
+    optimizer = BasketOptimizer(
+        max_positions=max_positions,
+        min_positions=min_positions,
+        soft_fill=soft_fill,
+    )
+    return optimizer.allocate(candidates)
 
-    allocations: list[dict[str, Any]] = []
-    used_symbols: set[str] = set()
 
-    for candidate in ranked:
-        symbol = str(candidate.get("symbol"))
-        if symbol in used_symbols:
-            continue
+def portfolio_summary(
+    candidates: list[dict[str, Any]],
+    *,
+    max_positions: int = DEFAULT_MAX_POSITIONS,
+    min_positions: int = DEFAULT_MIN_POSITIONS,
+    soft_fill: bool = True,
+) -> dict[str, Any]:
+    basket = build_basket(
+        candidates,
+        max_positions=max_positions,
+        min_positions=min_positions,
+        soft_fill=soft_fill,
+    )
+    return basket.as_dict()
 
-        allocations.append(
-            {
-                "strategy_id": candidate.get("strategy_id"),
-                "symbol": symbol,
-                "family": candidate.get("family"),
-                "allocation_pct": round(1 / max_positions, 3),
-                "score": candidate_score(candidate),
-                "status": candidate.get("status"),
-            }
-        )
 
-        used_symbols.add(symbol)
+def strict_portfolio(candidates: list[dict[str, Any]], *, max_positions: int = DEFAULT_MAX_POSITIONS) -> list[dict[str, Any]]:
+    optimizer = BasketOptimizer(
+        max_positions=max_positions,
+        min_positions=max_positions,
+        soft_fill=False,
+    )
+    return optimizer.allocate(candidates)
 
-        if len(allocations) >= max_positions:
-            break
 
-    return allocations
+def probationary_portfolio(
+    candidates: list[dict[str, Any]],
+    *,
+    max_positions: int = DEFAULT_MAX_POSITIONS,
+    min_positions: int = DEFAULT_MIN_POSITIONS,
+) -> list[dict[str, Any]]:
+    optimizer = BasketOptimizer(
+        max_positions=max_positions,
+        min_positions=min_positions,
+        soft_fill=True,
+    )
+    return optimizer.allocate(candidates)
